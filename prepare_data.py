@@ -10,7 +10,8 @@ from os import walk
 # # # Get path where dataset is stored # # #
 
 dir_dataset = ['dataset-strabismus']
-
+img_rows = 1080
+img_cols = 1290
 
 def xml2dataframe():
 
@@ -84,10 +85,38 @@ def plot_im_mask(im,im_mask):
     plt.subplot(1,3,3)
     plt.imshow(cv2.bitwise_and(im,im,mask=im_mask));
     plt.axis('off')
-    plt.show();
+    plt.show()
 
 
-def getImage(df, ind, size=(1290,1080), augmentation=False, trans_range=20, scale_range=20):
+def plot_bbox(bb_boxes,ind_bb,color='r',linewidth=2):
+    ### Plot bounding box
+
+    bb_box_i = [bb_boxes.iloc[ind_bb]['xmin'],
+                bb_boxes.iloc[ind_bb]['ymin'],
+                bb_boxes.iloc[ind_bb]['xmax'],
+                bb_boxes.iloc[ind_bb]['ymax']]
+    bb_box_i = list(map(int, bb_box_i))
+    plt.plot([bb_box_i[0],bb_box_i[2],bb_box_i[2],
+                  bb_box_i[0],bb_box_i[0]],
+             [bb_box_i[1],bb_box_i[1],bb_box_i[3],
+                  bb_box_i[3],bb_box_i[1]],
+             color,linewidth=linewidth)
+
+
+def plot_im_bbox(im,bb_boxes):
+    ### Plot image and bounding box
+    plt.imshow(im)
+    for i in range(len(bb_boxes)):
+        plot_bbox(bb_boxes,i,'g')
+
+        bb_box_i = [bb_boxes.iloc[i]['xmin'],bb_boxes.iloc[i]['ymin'],
+                bb_boxes.iloc[i]['xmax'],bb_boxes.iloc[i]['ymax']]
+        plt.plot(bb_box_i[0],bb_box_i[1],'rs')
+        plt.plot(bb_box_i[2],bb_box_i[3],'bs')
+    plt.axis('off');
+
+
+def getImage(df, ind, size=(1290, 1080)):
     file_name = df['frame'][ind]
     img = cv2.imread(dir_dataset[0] + '/' + file_name)
     img_size = np.shape(img)
@@ -105,10 +134,16 @@ def getImage(df, ind, size=(1290,1080), augmentation=False, trans_range=20, scal
     return file_name, img, bnd_boxes
 
 
-def init():
 
+def getdatasetready():
     df = xml2dataframe()
-    file_name, img, bnd_boxes = getImage(df, 6)
-    img_mask = get_mask_seg(img, bnd_boxes)
-    plot_im_mask(img, img_mask)
-init()
+    elements_count = df.shape
+    batch_images = np.zeros((elements_count[0], img_rows, img_cols, 3))
+    batch_masks = np.zeros((elements_count[0], img_rows, img_cols, 1))
+    for d in range(elements_count[0]):
+        file_name, img, bnd_boxes = getImage(df, d)
+        img_mask = get_mask_seg(img, bnd_boxes)
+        batch_images[d] = img
+        batch_masks[d] = img_mask
+
+    return batch_images, batch_masks
