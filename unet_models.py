@@ -1,476 +1,236 @@
-from torch import nn
-import torch
-from torchvision import models
-import torchvision
-from torch.nn import functional as F
+'''
+ * @author [Zizhao Zhang]
+ * @email [zizhao@cise.ufl.edu]
+ * @create date 2017-05-25 02:21:13
+ * @modify date 2017-05-25 02:21:13
+ * @desc [description]
+'''
+import tensorflow as tf
+try:
+    from tensorflow.contrib import keras as keras
+    print ('load keras from tensorflow package')
+except:
+    print ('update your tensorflow')
+from tensorflow.contrib.keras import models
+from tensorflow.contrib.keras import layers
+from keras.models import Model
+from keras.layers import Input, merge, Convolution2D, MaxPooling2D, UpSampling2D,Lambda
+from keras.optimizers import Adam
+from keras.callbacks import ModelCheckpoint, LearningRateScheduler
 from keras import backend as K
+from scipy.ndimage.measurements import label
+import numpy as np
+from utils import VIS, mean_IU
 
+class UNet():
+    def __init__(self):
+        print ('build UNet ...')
 
-def conv3x3(in_, out):
-    return nn.Conv2d(in_, out, 3, padding=1)
-
-
-class ConvRelu(nn.Module):
-    def __init__(self, in_: int, out: int):
-        super(ConvRelu, self).__init__()
-        self.conv = conv3x3(in_, out)
-        self.activation = nn.ReLU(inplace=True)
-
-    def forward(self, x):
-        x = self.conv(x)
-        x = self.activation(x)
-        return x
-
-
-class DecoderBlock(nn.Module):
-    """
-    Paramaters for Deconvolution were chosen to avoid artifacts, following
-    link https://distill.pub/2016/deconv-checkerboard/
-    """
-
-    def __init__(self, in_channels, middle_channels, out_channels, is_deconv=True):
-        super(DecoderBlock, self).__init__()
-        self.in_channels = in_channels
-
-        if is_deconv:
-            self.block = nn.Sequential(
-                ConvRelu(in_channels, middle_channels),
-                nn.ConvTranspose2d(middle_channels, out_channels, kernel_size=4, stride=2,
-                                   padding=1),
-                nn.ReLU(inplace=True)
-            )
+    def get_crop_shape(self, target, refer):
+        # width, the 3rd dimension
+        cw = (target.get_shape()[2] - refer.get_shape()[2]).value
+        assert (cw >= 0)
+        if cw % 2 != 0:
+            cw1, cw2 = int(cw/2), int(cw/2) + 1
         else:
-            self.block = nn.Sequential(
-                nn.Upsample(scale_factor=2, mode='bilinear'),
-                ConvRelu(in_channels, middle_channels),
-                ConvRelu(middle_channels, out_channels),
-            )
-
-    def forward(self, x):
-        return self.block(x)
-
-
-class UNet11(nn.Module):
-    def __init__(self, num_classes=1, num_filters=32, pretrained=False):
-        """
-        :param num_classes:
-        :param num_filters:
-        :param pretrained:
-            False - no pre-trained network used
-            True - encoder pre-trained with VGG11
-        """
-        super().__init__()
-        self.pool = nn.MaxPool2d(2, 2)
-
-        self.num_classes = num_classes
-
-        self.encoder = models.vgg11(pretrained=pretrained).features
-
-        self.relu = nn.ReLU(inplace=True)
-        self.conv1 = nn.Sequential(self.encoder[0],
-                                   self.relu)
-
-        self.conv2 = nn.Sequential(self.encoder[3],
-                                   self.relu)
-
-        self.conv3 = nn.Sequential(
-            self.encoder[6],
-            self.relu,
-            self.encoder[8],
-            self.relu,
-        )
-        self.conv4 = nn.Sequential(
-            self.encoder[11],
-            self.relu,
-            self.encoder[13],
-            self.relu,
-        )
-
-        self.conv5 = nn.Sequential(
-            self.encoder[16],
-            self.relu,
-            self.encoder[18],
-            self.relu,
-        )
-
-        self.center = DecoderBlock(256 + num_filters * 8, num_filters * 8 * 2, num_filters * 8, is_deconv=True)
-        self.dec5 = DecoderBlock(512 + num_filters * 8, num_filters * 8 * 2, num_filters * 8, is_deconv=True)
-        self.dec4 = DecoderBlock(512 + num_filters * 8, num_filters * 8 * 2, num_filters * 4, is_deconv=True)
-        self.dec3 = DecoderBlock(256 + num_filters * 4, num_filters * 4 * 2, num_filters * 2, is_deconv=True)
-        self.dec2 = DecoderBlock(128 + num_filters * 2, num_filters * 2 * 2, num_filters, is_deconv=True)
-        self.dec1 = ConvRelu(64 + num_filters, num_filters)
-
-        self.final = nn.Conv2d(num_filters, num_classes, kernel_size=1)
-
-    def forward(self, x):
-        conv1 = self.conv1(x)
-        conv2 = self.conv2(self.pool(conv1))
-        conv3 = self.conv3(self.pool(conv2))
-        conv4 = self.conv4(self.pool(conv3))
-        conv5 = self.conv5(self.pool(conv4))
-        center = self.center(self.pool(conv5))
-
-        dec5 = self.dec5(torch.cat([center, conv5], 1))
-        dec4 = self.dec4(torch.cat([dec5, conv4], 1))
-        dec3 = self.dec3(torch.cat([dec4, conv3], 1))
-        dec2 = self.dec2(torch.cat([dec3, conv2], 1))
-        dec1 = self.dec1(torch.cat([dec2, conv1], 1))
-
-        if self.num_classes > 1:
-            x_out = F.log_softmax(self.final(dec1), dim=1)
+            cw1, cw2 = int(cw/2), int(cw/2)
+        # height, the 2nd dimension
+        ch = (target.get_shape()[1] - refer.get_shape()[1]).value
+        assert (ch >= 0)
+        if ch % 2 != 0:
+            ch1, ch2 = int(ch/2), int(ch/2) + 1
         else:
-            x_out = self.final(dec1)
-
-        return x_out
-
-
-class UNet16(nn.Module):
-    def __init__(self, num_classes=1, num_filters=32, pretrained=False):
-        """
-        :param num_classes:
-        :param num_filters:
-        :param pretrained:
-            False - no pre-trained network used
-            True - encoder pre-trained with VGG11
-        """
-        super().__init__()
-        self.num_classes = num_classes
-
-        self.pool = nn.MaxPool2d(2, 2)
-
-        self.encoder = torchvision.models.vgg16(pretrained=pretrained).features
-
-        self.relu = nn.ReLU(inplace=True)
-
-        self.conv1 = nn.Sequential(self.encoder[0],
-                                   self.relu,
-                                   self.encoder[2],
-                                   self.relu)
-
-        self.conv2 = nn.Sequential(self.encoder[5],
-                                   self.relu,
-                                   self.encoder[7],
-                                   self.relu)
-
-        self.conv3 = nn.Sequential(self.encoder[10],
-                                   self.relu,
-                                   self.encoder[12],
-                                   self.relu,
-                                   self.encoder[14],
-                                   self.relu)
-
-        self.conv4 = nn.Sequential(self.encoder[17],
-                                   self.relu,
-                                   self.encoder[19],
-                                   self.relu,
-                                   self.encoder[21],
-                                   self.relu)
-
-        self.conv5 = nn.Sequential(self.encoder[24],
-                                   self.relu,
-                                   self.encoder[26],
-                                   self.relu,
-                                   self.encoder[28],
-                                   self.relu)
-
-        self.center = DecoderBlock(512, num_filters * 8 * 2, num_filters * 8)
-
-        self.dec5 = DecoderBlock(512 + num_filters * 8, num_filters * 8 * 2, num_filters * 8)
-        self.dec4 = DecoderBlock(512 + num_filters * 8, num_filters * 8 * 2, num_filters * 8)
-        self.dec3 = DecoderBlock(256 + num_filters * 8, num_filters * 4 * 2, num_filters * 2)
-        self.dec2 = DecoderBlock(128 + num_filters * 2, num_filters * 2 * 2, num_filters)
-        self.dec1 = ConvRelu(64 + num_filters, num_filters)
-        self.final = nn.Conv2d(num_filters, num_classes, kernel_size=1)
-
-    def forward(self, x):
-        conv1 = self.conv1(x)
-        conv2 = self.conv2(self.pool(conv1))
-        conv3 = self.conv3(self.pool(conv2))
-        conv4 = self.conv4(self.pool(conv3))
-        conv5 = self.conv5(self.pool(conv4))
-
-        center = self.center(self.pool(conv5))
-
-        dec5 = self.dec5(torch.cat([center, conv5], 1))
-
-        dec4 = self.dec4(torch.cat([dec5, conv4], 1))
-        dec3 = self.dec3(torch.cat([dec4, conv3], 1))
-        dec2 = self.dec2(torch.cat([dec3, conv2], 1))
-        dec1 = self.dec1(torch.cat([dec2, conv1], 1))
-
-        if self.num_classes > 1:
-            x_out = F.log_softmax(self.final(dec1), dim=1)
-        else:
-            x_out = self.final(dec1)
-
-        return x_out
-
-
-class DecoderBlockLinkNet(nn.Module):
-    def __init__(self, in_channels, n_filters):
-        super().__init__()
-
-        self.relu = nn.ReLU(inplace=True)
-
-        # B, C, H, W -> B, C/4, H, W
-        self.conv1 = nn.Conv2d(in_channels, in_channels // 4, 1)
-        self.norm1 = nn.BatchNorm2d(in_channels // 4)
-
-        # B, C/4, H, W -> B, C/4, 2 * H, 2 * W
-        self.deconv2 = nn.ConvTranspose2d(in_channels // 4, in_channels // 4, kernel_size=4,
-                                          stride=2, padding=1, output_padding=0)
-        self.norm2 = nn.BatchNorm2d(in_channels // 4)
-
-        # B, C/4, H, W -> B, C, H, W
-        self.conv3 = nn.Conv2d(in_channels // 4, n_filters, 1)
-        self.norm3 = nn.BatchNorm2d(n_filters)
-
-    def forward(self, x):
-        x = self.conv1(x)
-        x = self.norm1(x)
-        x = self.relu(x)
-        x = self.deconv2(x)
-        x = self.norm2(x)
-        x = self.relu(x)
-        x = self.conv3(x)
-        x = self.norm3(x)
-        x = self.relu(x)
-        return x
-
-
-class LinkNet34(nn.Module):
-    def __init__(self, num_classes=1, num_channels=3, pretrained=True):
-        super().__init__()
-        assert num_channels == 3
-        self.num_classes = num_classes
-        filters = [64, 128, 256, 512]
-        resnet = models.resnet34(pretrained=pretrained)
-
-        self.firstconv = resnet.conv1
-        self.firstbn = resnet.bn1
-        self.firstrelu = resnet.relu
-        self.firstmaxpool = resnet.maxpool
-        self.encoder1 = resnet.layer1
-        self.encoder2 = resnet.layer2
-        self.encoder3 = resnet.layer3
-        self.encoder4 = resnet.layer4
-
-        # Decoder
-        self.decoder4 = DecoderBlockLinkNet(filters[3], filters[2])
-        self.decoder3 = DecoderBlockLinkNet(filters[2], filters[1])
-        self.decoder2 = DecoderBlockLinkNet(filters[1], filters[0])
-        self.decoder1 = DecoderBlockLinkNet(filters[0], filters[0])
-
-        # Final Classifier
-        self.finaldeconv1 = nn.ConvTranspose2d(filters[0], 32, 3, stride=2)
-        self.finalrelu1 = nn.ReLU(inplace=True)
-        self.finalconv2 = nn.Conv2d(32, 32, 3)
-        self.finalrelu2 = nn.ReLU(inplace=True)
-        self.finalconv3 = nn.Conv2d(32, num_classes, 2, padding=1)
-
-    # noinspection PyCallingNonCallable
-    def forward(self, x):
-        # Encoder
-        x = self.firstconv(x)
-        x = self.firstbn(x)
-        x = self.firstrelu(x)
-        x = self.firstmaxpool(x)
-        e1 = self.encoder1(x)
-        e2 = self.encoder2(e1)
-        e3 = self.encoder3(e2)
-        e4 = self.encoder4(e3)
-
-        # Decoder with Skip Connections
-        d4 = self.decoder4(e4) + e3
-        d3 = self.decoder3(d4) + e2
-        d2 = self.decoder2(d3) + e1
-        d1 = self.decoder1(d2)
-
-        # Final Classification
-        f1 = self.finaldeconv1(d1)
-        f2 = self.finalrelu1(f1)
-        f3 = self.finalconv2(f2)
-        f4 = self.finalrelu2(f3)
-        f5 = self.finalconv3(f4)
-
-        if self.num_classes > 1:
-            x_out = F.log_softmax(f5, dim=1)
-        else:
-            x_out = f5
-        return x_out
-
-
-class Conv3BN(nn.Module):
-    def __init__(self, in_: int, out: int, bn=False):
-        super().__init__()
-        self.conv = conv3x3(in_, out)
-        self.bn = nn.BatchNorm2d(out) if bn else None
-        self.activation = nn.ReLU(inplace=True)
-
-    def forward(self, x):
-        x = self.conv(x)
-        if self.bn is not None:
-            x = self.bn(x)
-        x = self.activation(x)
-        return x
-
-
-class UNetModule(nn.Module):
-    def __init__(self, in_: int, out: int):
-        super().__init__()
-        self.l1 = Conv3BN(in_, out)
-        self.l2 = Conv3BN(out, out)
-
-    def forward(self, x):
-        x = self.l1(x)
-        x = self.l2(x)
-        return x
-
-
-class UNet(nn.Module):
-    """
-    Vanilla UNet.
-    Implementation from https://github.com/lopuhin/mapillary-vistas-2017/blob/master/unet_models.py
-    """
-    output_downscaled = 1
-    module = UNetModule
-
-    def __init__(self,
-                 input_channels: int = 3,
-                 filters_base: int = 32,
-                 down_filter_factors=(1, 2, 4, 8, 16),
-                 up_filter_factors=(1, 2, 4, 8, 16),
-                 bottom_s=4,
-                 num_classes=1,
-                 add_output=True):
-        super().__init__()
-        self.num_classes = num_classes
-        assert len(down_filter_factors) == len(up_filter_factors)
-        assert down_filter_factors[-1] == up_filter_factors[-1]
-        down_filter_sizes = [filters_base * s for s in down_filter_factors]
-        up_filter_sizes = [filters_base * s for s in up_filter_factors]
-        self.down, self.up = nn.ModuleList(), nn.ModuleList()
-        self.down.append(self.module(input_channels, down_filter_sizes[0]))
-        for prev_i, nf in enumerate(down_filter_sizes[1:]):
-            self.down.append(self.module(down_filter_sizes[prev_i], nf))
-        for prev_i, nf in enumerate(up_filter_sizes[1:]):
-            self.up.append(self.module(
-                down_filter_sizes[prev_i] + nf, up_filter_sizes[prev_i]))
-        pool = nn.MaxPool2d(2, 2)
-        pool_bottom = nn.MaxPool2d(bottom_s, bottom_s)
-        upsample = nn.Upsample(scale_factor=2)
-        upsample_bottom = nn.Upsample(scale_factor=bottom_s)
-        self.downsamplers = [None] + [pool] * (len(self.down) - 1)
-        self.downsamplers[-1] = pool_bottom
-        self.upsamplers = [upsample] * len(self.up)
-        self.upsamplers[-1] = upsample_bottom
-        self.add_output = add_output
-        if add_output:
-            self.conv_final = nn.Conv2d(up_filter_sizes[0], num_classes, 1)
-
-    def forward(self, x):
-        xs = []
-        for downsample, down in zip(self.downsamplers, self.down):
-            x_in = x if downsample is None else downsample(xs[-1])
-            x_out = down(x_in)
-            xs.append(x_out)
-
-        x_out = xs[-1]
-        for x_skip, upsample, up in reversed(
-                list(zip(xs[:-1], self.upsamplers, self.up))):
-            x_out = upsample(x_out)
-            x_out = up(torch.cat([x_out, x_skip], 1))
-
-        if self.add_output:
-            x_out = self.conv_final(x_out)
-            if self.num_classes > 1:
-                x_out = F.log_softmax(x_out, dim=1)
-        return x_out
-
-
-class AlbuNet(nn.Module):
-    """
-        UNet (https://arxiv.org/abs/1505.04597) with Resnet34(https://arxiv.org/abs/1512.03385) encoder
-        Proposed by Alexander Buslaev: https://www.linkedin.com/in/al-buslaev/
-        """
-
-    def __init__(self, num_classes=1, num_filters=32, pretrained=False, is_deconv=False):
-        """
-        :param num_classes:
-        :param num_filters:
-        :param pretrained:
-            False - no pre-trained network is used
-            True  - encoder is pre-trained with resnet34
-        :is_deconv:
-            False: bilinear interpolation is used in decoder
-            True: deconvolution is used in decoder
-        """
-        super().__init__()
-        self.num_classes = num_classes
-
-        self.pool = nn.MaxPool2d(2, 2)
-
-        self.encoder = torchvision.models.resnet34(pretrained=pretrained)
-
-        self.relu = nn.ReLU(inplace=True)
-
-        self.conv1 = nn.Sequential(self.encoder.conv1,
-                                   self.encoder.bn1,
-                                   self.encoder.relu,
-                                   self.pool)
-
-        self.conv2 = self.encoder.layer1
-
-        self.conv3 = self.encoder.layer2
-
-        self.conv4 = self.encoder.layer3
-
-        self.conv5 = self.encoder.layer4
-
-        self.center = DecoderBlock(512, num_filters * 8 * 2, num_filters * 8, is_deconv)
-
-        self.dec5 = DecoderBlock(512 + num_filters * 8, num_filters * 8 * 2, num_filters * 8, is_deconv)
-        self.dec4 = DecoderBlock(256 + num_filters * 8, num_filters * 8 * 2, num_filters * 8, is_deconv)
-        self.dec3 = DecoderBlock(128 + num_filters * 8, num_filters * 4 * 2, num_filters * 2, is_deconv)
-        self.dec2 = DecoderBlock(64 + num_filters * 2, num_filters * 2 * 2, num_filters * 2 * 2, is_deconv)
-        self.dec1 = DecoderBlock(num_filters * 2 * 2, num_filters * 2 * 2, num_filters, is_deconv)
-        self.dec0 = ConvRelu(num_filters, num_filters)
-        self.final = nn.Conv2d(num_filters, num_classes, kernel_size=1)
-
-    def forward(self, x):
-        conv1 = self.conv1(x)
-        conv2 = self.conv2(conv1)
-        conv3 = self.conv3(conv2)
-        conv4 = self.conv4(conv3)
-        conv5 = self.conv5(conv4)
-
-        center = self.center(self.pool(conv5))
-
-        dec5 = self.dec5(torch.cat([center, conv5], 1))
-
-        dec4 = self.dec4(torch.cat([dec5, conv4], 1))
-        dec3 = self.dec3(torch.cat([dec4, conv3], 1))
-        dec2 = self.dec2(torch.cat([dec3, conv2], 1))
-        dec1 = self.dec1(dec2)
-        dec0 = self.dec0(dec1)
-
-        if self.num_classes > 1:
-            x_out = F.log_softmax(self.final(dec0), dim=1)
-        else:
-            x_out = self.final(dec0)
-
-        return x_out
-
-smooth = 1.
-
-
-def IOU_calc(y_true, y_pred):
-    y_true_f = K.flatten(y_true)
-    y_pred_f = K.flatten(y_pred)
-    intersection = K.sum(y_true_f * y_pred_f)
-
-    return 2*(intersection + smooth) / (K.sum(y_true_f) + K.sum(y_pred_f) + smooth)
-
-
-def IOU_calc_loss(y_true, y_pred):
-    return -IOU_calc(y_true, y_pred)
+            ch1, ch2 = int(ch/2), int(ch/2)
+
+        return (ch1, ch2), (cw1, cw2)
+
+    def create_model(self, img_shape, num_class):
+
+        concat_axis = 3
+        inputs = layers.Input(shape = img_shape)
+
+        conv1 = layers.Conv2D(32, (3, 3), activation='relu', padding='same', name='conv1_1')(inputs)
+        conv1 = layers.Conv2D(32, (3, 3), activation='relu', padding='same')(conv1)
+        pool1 = layers.MaxPooling2D(pool_size=(2, 2))(conv1)
+        conv2 = layers.Conv2D(64, (3, 3), activation='relu', padding='same')(pool1)
+        conv2 = layers.Conv2D(64, (3, 3), activation='relu', padding='same')(conv2)
+        pool2 = layers.MaxPooling2D(pool_size=(2, 2))(conv2)
+
+        conv3 = layers.Conv2D(128, (3, 3), activation='relu', padding='same')(pool2)
+        conv3 = layers.Conv2D(128, (3, 3), activation='relu', padding='same')(conv3)
+        pool3 = layers.MaxPooling2D(pool_size=(2, 2))(conv3)
+
+        conv4 = layers.Conv2D(256, (3, 3), activation='relu', padding='same')(pool3)
+        conv4 = layers.Conv2D(256, (3, 3), activation='relu', padding='same')(conv4)
+        pool4 = layers.MaxPooling2D(pool_size=(2, 2))(conv4)
+
+        conv5 = layers.Conv2D(512, (3, 3), activation='relu', padding='same')(pool4)
+        conv5 = layers.Conv2D(512, (3, 3), activation='relu', padding='same')(conv5)
+
+        up_conv5 = layers.UpSampling2D(size=(2, 2))(conv5)
+        ch, cw = self.get_crop_shape(conv4, up_conv5)
+        crop_conv4 = layers.Cropping2D(cropping=(ch,cw))(conv4)
+        up6 = layers.concatenate([up_conv5, crop_conv4], axis=concat_axis)
+        conv6 = layers.Conv2D(256, (3, 3), activation='relu', padding='same')(up6)
+        conv6 = layers.Conv2D(256, (3, 3), activation='relu', padding='same')(conv6)
+
+        up_conv6 = layers.UpSampling2D(size=(2, 2))(conv6)
+        ch, cw = self.get_crop_shape(conv3, up_conv6)
+        crop_conv3 = layers.Cropping2D(cropping=(ch,cw))(conv3)
+        up7 = layers.concatenate([up_conv6, crop_conv3], axis=concat_axis)
+        conv7 = layers.Conv2D(128, (3, 3), activation='relu', padding='same')(up7)
+        conv7 = layers.Conv2D(128, (3, 3), activation='relu', padding='same')(conv7)
+
+        up_conv7 = layers.UpSampling2D(size=(2, 2))(conv7)
+        ch, cw = self.get_crop_shape(conv2, up_conv7)
+        crop_conv2 = layers.Cropping2D(cropping=(ch,cw))(conv2)
+        up8 = layers.concatenate([up_conv7, crop_conv2], axis=concat_axis)
+        conv8 = layers.Conv2D(64, (3, 3), activation='relu', padding='same')(up8)
+        conv8 = layers.Conv2D(64, (3, 3), activation='relu', padding='same')(conv8)
+
+        up_conv8 = layers.UpSampling2D(size=(2, 2))(conv8)
+        ch, cw = self.get_crop_shape(conv1, up_conv8)
+        crop_conv1 = layers.Cropping2D(cropping=(ch,cw))(conv1)
+        up9 = layers.concatenate([up_conv8, crop_conv1], axis=concat_axis)
+        conv9 = layers.Conv2D(32, (3, 3), activation='relu', padding='same')(up9)
+        conv9 = layers.Conv2D(32, (3, 3), activation='relu', padding='same')(conv9)
+
+        ch, cw = self.get_crop_shape(inputs, conv9)
+        conv9 = layers.ZeroPadding2D(padding=((ch[0], ch[1]), (cw[0], cw[1])))(conv9)
+        conv10 = layers.Conv2D(num_class, (1, 1))(conv9)
+
+        model = models.Model(inputs=inputs, outputs=conv10)
+
+        return model
+
+
+def train_model(train_generator, test_generator, test_samples, learning_rate=0.01, iter_epoch=100, lr_decay=50, epoch=50, checkpoint_path=""):
+
+    num_class = 3
+    img_shape=[1080,1290]
+    label = tf.placeholder(tf.int32, shape=[None] + img_shape)
+
+    # configuration session
+    config = tf.ConfigProto()
+    config.gpu_options.allow_growth = True
+    sess = tf.Session(config=config)
+
+    # define model
+    with tf.name_scope('unet'):
+        model = UNet().create_model(img_shape=img_shape + [3], num_class=num_class)
+        img = model.input
+        pred = model.output
+
+    # define loss
+    with tf.name_scope('cross_entropy'):
+        cross_entropy_loss = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(labels=label, logits=pred))
+
+    # define optimizer
+    with tf.name_scope('learning_rate'):
+        global_step = tf.Variable(0, name='global_step', trainable=False)
+        learning_rate = tf.train.exponential_decay(learning_rate, global_step,iter_epoch, lr_decay, staircase=True)
+
+    train_step = tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(cross_entropy_loss, global_step=global_step)
+
+    tf.summary.scalar('cross_entropy_loss', cross_entropy_loss)
+    tf.summary.scalar('learning_rate', learning_rate)
+    summary_merged = tf.summary.merge_all()
+
+    tot_iter = iter_epoch * epoch
+    init_op = tf.global_variables_initializer()
+    sess.run(init_op)
+
+    # define file save
+    # save and compute metrics
+    vis = VIS(save_path=checkpoint_path)
+    train_writer = tf.summary.FileWriter(checkpoint_path, sess.graph)
+
+    with sess.as_default():
+
+        start = global_step.eval()
+        for it in range(start, tot_iter):
+            if it % iter_epoch == 0 or it == start:
+                for ti in range(test_samples):
+                    x_batch, y_batch = next(test_generator)
+                    # tensorflow wants a different tensor order
+                    print(np.shape(x_batch))
+                    feed_dict = { img: x_batch, label: y_batch}
+                    loss, pred_logits = sess.run([cross_entropy_loss, pred], feed_dict=feed_dict)
+                    pred_map_batch = np.argmax(pred_logits, axis=3)
+                    # import pdb; pdb.set_trace()
+                    for pred_map, y in zip(pred_map_batch, y_batch):
+                        score = vis.add_sample(pred_map, y)
+                vis.compute_scores(suffix=it)
+
+                x_batch, y_batch = next(train_generator)
+                feed_dict = {img: x_batch, label: y_batch}
+                _, loss, summary, lr, pred_logits = sess.run([train_step, cross_entropy_loss, summary_merged, learning_rate, pred], feed_dict=feed_dict)
+                global_step.assign(it).eval()
+                train_writer.add_summary(summary, it)
+
+                pred_map = np.argmax(pred_logits[0], axis=2)
+                score, _ = mean_IU(pred_map, y_batch[0])
+
+                if it % 20 == 0:
+                    print('[iter %d, epoch %.3f]: lr=%f loss=%f, mean_IU=%f' % (
+                    it, float(it) / iter_epoch, lr, loss, score))
+
+def conv2d_block(input_tensor, n_filters, kernel_size=3, batchnorm=True):
+    # first layer
+    x = Conv2D(filters=n_filters, kernel_size=(kernel_size, kernel_size), kernel_initializer="he_normal",
+               padding="same")(input_tensor)
+    if batchnorm:
+        x = BatchNormalization()(x)
+    x = Activation("relu")(x)
+    # second layer
+    x = Conv2D(filters=n_filters, kernel_size=(kernel_size, kernel_size), kernel_initializer="he_normal",
+               padding="same")(x)
+    if batchnorm:
+        x = BatchNormalization()(x)
+    x = Activation("relu")(x)
+    return x
+
+def get_unet(input_img, n_filters=16, dropout=0.5, batchnorm=True):
+    # contracting path
+    c1 = conv2d_block(input_img, n_filters=n_filters * 1, kernel_size=3, batchnorm=batchnorm)
+    p1 = MaxPooling2D((2, 2))(c1)
+    p1 = Dropout(dropout * 0.5)(p1)
+
+    c2 = conv2d_block(p1, n_filters=n_filters * 2, kernel_size=3, batchnorm=batchnorm)
+    p2 = MaxPooling2D((2, 2))(c2)
+    p2 = Dropout(dropout)(p2)
+
+    c3 = conv2d_block(p2, n_filters=n_filters * 4, kernel_size=3, batchnorm=batchnorm)
+    p3 = MaxPooling2D((2, 2))(c3)
+    p3 = Dropout(dropout)(p3)
+
+    c4 = conv2d_block(p3, n_filters=n_filters * 8, kernel_size=3, batchnorm=batchnorm)
+    p4 = MaxPooling2D(pool_size=(2, 2))(c4)
+    p4 = Dropout(dropout)(p4)
+
+    c5 = conv2d_block(p4, n_filters=n_filters * 16, kernel_size=3, batchnorm=batchnorm)
+
+    # expansive path
+    u6 = Conv2DTranspose(n_filters * 8, (3, 3), strides=(2, 2), padding='same')(c5)
+    u6 = concatenate([u6, c4])
+    u6 = Dropout(dropout)(u6)
+    c6 = conv2d_block(u6, n_filters=n_filters * 8, kernel_size=3, batchnorm=batchnorm)
+
+    u7 = Conv2DTranspose(n_filters * 4, (3, 3), strides=(2, 2), padding='same')(c6)
+    u7 = concatenate([u7, c3])
+    u7 = Dropout(dropout)(u7)
+    c7 = conv2d_block(u7, n_filters=n_filters * 4, kernel_size=3, batchnorm=batchnorm)
+
+    u8 = Conv2DTranspose(n_filters * 2, (3, 3), strides=(2, 2), padding='same')(c7)
+    u8 = concatenate([u8, c2])
+    u8 = Dropout(dropout)(u8)
+    c8 = conv2d_block(u8, n_filters=n_filters * 2, kernel_size=3, batchnorm=batchnorm)
+
+    u9 = Conv2DTranspose(n_filters * 1, (3, 3), strides=(2, 2), padding='same')(c8)
+    u9 = concatenate([u9, c1], axis=3)
+    u9 = Dropout(dropout)(u9)
+    c9 = conv2d_block(u9, n_filters=n_filters * 1, kernel_size=3, batchnorm=batchnorm)
+
+    outputs = Conv2D(1, (1, 1), activation='sigmoid')(c9)
+    model = Model(inputs=[input_img], outputs=[outputs])
+    return model

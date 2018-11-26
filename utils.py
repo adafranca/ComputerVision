@@ -1,102 +1,150 @@
-import json
-from datetime import datetime
-from pathlib import Path
+'''
+ * @author [Zizhao Zhang]
+ * @email [zizhao@cise.ufl.edu]
+ * @create date 2017-07-03 11:25:40
+ * @modify date 2017-07-03 11:25:40
+ * @desc [description]
+'''
 
-import random
+from keras import backend as K
 import numpy as np
-
-import torch
-import tqdm
-
-
-def cuda(x):
-    return x.cuda(async=True) if torch.cuda.is_available() else x
+from PIL import Image
+import os, copy, shutil, json
+from skimage import measure
 
 
-def write_event(log, step, **data):
-    data['step'] = step
-    data['dt'] = datetime.now().isoformat()
-    log.write(json.dumps(data, sort_keys=True))
-    log.write('\n')
-    log.flush()
+class VIS:
+    def __init__(self, save_path):
+
+        self.path = save_path
+        # TODO
+        self.semantic_label = None
+
+        if os.path.isdir(self.path):
+            shutil.rmtree(self.path)
+        os.mkdir(self.path)
+
+        self.mean_iu = []
+        self.cls_iu = []
+        self.score_history = {}
+        self.suffix = str(np.random.randint(1000))
 
 
-def check_crop_size(image_height, image_width):
-    """Checks if image size divisible by 32.
-    Args:
-        image_height:
-        image_width:
-    Returns:
-        True if both height and width divisible by 32 and False otherwise.
-    """
-    return image_height % 32 == 0 and image_width % 32 == 0
+    def add_sample(self, pred, gt):
+        score_mean, score_cls = mean_IU(pred, gt)
+        self.mean_iu.append(score_mean)
+        self.cls_iu.append(score_cls)
+
+        return score_mean
+
+    def compute_scores(self, suffix=0):
+        meanIU = np.mean(np.array(self.mean_iu))
+        meanIU_per_cls = np.mean(np.array(self.cls_iu), axis=0)
+        print('-' * 20)
+        print('overall mean IU: {} '.format(meanIU))
+        print('mean IU per class')
+        for i, c in enumerate(meanIU_per_cls):
+            print('\t class {}: {}'.format(i, c))
+        print('-' * 20)
+
+        data = {'mean_IU': '%.2f' % (meanIU), 'mean_IU_cls': ['%.2f' % (a) for a in meanIU_per_cls.tolist()]}
+        self.score_history['%.10d' % suffix] = data
+        json.dump(self.score_history, open(os.path.join(self.path, 'meanIU{}.json'.format(self.suffix)), 'w'), indent=2,
+                  sort_keys=True)
 
 
-def train(args, model, criterion, train_loader, valid_loader, validation, init_optimizer, n_epochs=None, fold=None,
-          num_classes=None):
-    lr = args.lr
-    n_epochs = n_epochs or args.n_epochs
-    optimizer = init_optimizer(lr)
+def mean_IU(eval_segm, gt_segm):
+    '''
+    (1/n_cl) * sum_i(n_ii / (t_i + sum_j(n_ji) - n_ii))
+    '''
 
-    root = Path(args.root)
-    model_path = root / 'model_{fold}.pt'.format(fold=fold)
-    if model_path.exists():
-        state = torch.load(str(model_path))
-        epoch = state['epoch']
-        step = state['step']
-        model.load_state_dict(state['model'])
-        print('Restored model, epoch {}, step {:,}'.format(epoch, step))
-    else:
-        epoch = 1
-        step = 0
+    check_size(eval_segm, gt_segm)
 
-    save = lambda ep: torch.save({
-        'model': model.state_dict(),
-        'epoch': ep,
-        'step': step,
-    }, str(model_path))
+    cl, n_cl = union_classes(eval_segm, gt_segm)
+    _, n_cl_gt = extract_classes(gt_segm)
+    eval_mask, gt_mask = extract_both_masks(eval_segm, gt_segm, cl, n_cl)
 
-    report_each = 10
-    log = root.joinpath('train_{fold}.log'.format(fold=fold)).open('at', encoding='utf8')
-    valid_losses = []
-    for epoch in range(epoch, n_epochs + 1):
-        model.train()
-        random.seed()
-        tq = tqdm.tqdm(total=(len(train_loader) * args.batch_size))
-        tq.set_description('Epoch {}, lr {}'.format(epoch, lr))
-        losses = []
-        tl = train_loader
-        try:
-            mean_loss = 0
-            for i, (inputs, targets) in enumerate(tl):
-                inputs = cuda(inputs)
+    IU = list([0]) * n_cl
 
-                with torch.no_grad():
-                    targets = cuda(targets)
+    for i, c in enumerate(cl):
+        curr_eval_mask = eval_mask[i, :, :]
+        curr_gt_mask = gt_mask[i, :, :]
 
-                outputs = model(inputs)
-                loss = criterion(outputs, targets)
-                optimizer.zero_grad()
-                batch_size = inputs.size(0)
-                loss.backward()
-                optimizer.step()
-                step += 1
-                tq.update(batch_size)
-                losses.append(loss.item())
-                mean_loss = np.mean(losses[-report_each:])
-                tq.set_postfix(loss='{:.5f}'.format(mean_loss))
-                if i and i % report_each == 0:
-                    write_event(log, step, loss=mean_loss)
-            write_event(log, step, loss=mean_loss)
-            tq.close()
-            save(epoch + 1)
-            valid_metrics = validation(model, criterion, valid_loader, num_classes)
-            write_event(log, step, **valid_metrics)
-            valid_loss = valid_metrics['valid_loss']
-            valid_losses.append(valid_loss)
-        except KeyboardInterrupt:
-            tq.close()
-            print('Ctrl+C, saving snapshot')
-            save(epoch)
-            print('done.')
-        return
+        if (np.sum(curr_eval_mask) == 0) or (np.sum(curr_gt_mask) == 0):
+            continue
+
+        n_ii = np.sum(np.logical_and(curr_eval_mask, curr_gt_mask))
+        t_i = np.sum(curr_gt_mask)
+        n_ij = np.sum(curr_eval_mask)
+
+        IU[i] = n_ii / (t_i + n_ij - n_ii)
+
+    mean_IU_ = np.sum(IU) / n_cl_gt
+    return mean_IU_, IU
+
+
+'''Used by Tensorflow'''
+
+
+def dice_coef(y_true, y_pred):
+    smooth = 1.
+    y_true_f = K.flatten(y_true)
+    y_pred_f = K.flatten(y_pred)
+    intersection = K.sum(y_true_f * y_pred_f)
+    return (2. * intersection + smooth) / (K.sum(y_true_f) + K.sum(y_pred_f) + smooth)
+
+
+def dice_coef_loss(y_true, y_pred):
+    return -dice_coef(y_true, y_pred)
+
+
+def extract_both_masks(eval_segm, gt_segm, cl, n_cl):
+    eval_mask = extract_masks(eval_segm, cl, n_cl)
+    gt_mask = extract_masks(gt_segm, cl, n_cl)
+
+    return eval_mask, gt_mask
+
+
+def extract_classes(segm):
+    cl = np.unique(segm)
+    n_cl = len(cl)
+
+    return cl, n_cl
+
+
+def union_classes(eval_segm, gt_segm):
+    eval_cl, _ = extract_classes(eval_segm)
+    gt_cl, _ = extract_classes(gt_segm)
+
+    cl = np.union1d(eval_cl, gt_cl)
+    n_cl = len(cl)
+
+    return cl, n_cl
+
+
+def extract_masks(segm, cl, n_cl):
+    h, w = segm_size(segm)
+    masks = np.zeros((n_cl, h, w))
+
+    for i, c in enumerate(cl):
+        masks[i, :, :] = segm == c
+
+    return masks
+
+
+def segm_size(segm):
+    try:
+        height = segm.shape[0]
+        width = segm.shape[1]
+    except IndexError:
+        raise
+
+    return height, width
+
+
+def check_size(eval_segm, gt_segm):
+    h_e, w_e = segm_size(eval_segm)
+    h_g, w_g = segm_size(gt_segm)
+
+    if (h_e != h_g) or (w_e != w_g):
+        raise ValueError('Uneuqal image and mask size')

@@ -1,81 +1,39 @@
-from unet_models import UNet11
-from unet_models import UNet16
-from unet_models import UNet
-from unet_models import AlbuNet
-from unet_models import LinkNet34
-from prepare_data import getdatasetready
-from torch.optim import Adam
-from validation import validation_binary
-from torch.utils.data import DataLoader
-from loss import LossBinary, LossMulti
-import utils
-import argparse
-from pathlib import Path
+from prepare_data import generate_train_batch, getdatasetready
+from keras import backend as K
+from sklearn.model_selection import train_test_split
+import model
 
 num_classes = 1
 
+# save and compute_metrics
+#vis = VIS(save_path=opt.checkpoint_path)
 
-model_list = {'UNet11': UNet11,
-               'UNet16': UNet16,
-               'UNet': UNet,
-               'AlbuNet': AlbuNet,
-               'LinkNet34': LinkNet34}
+
+im_height = 1096
+im_width = 980
+smooth = 1.
+training_gen = generate_train_batch(1)
+
+#train_generator, train_samples = dataLoader(getdatasetready(), opt.batch_size,(im_height, im_width), mean=dataset_mean, std=dataset_std)
+#test_generator, test_samples = dataLoader(opt.data_path+'/val/', 1,  (im_height, im_width), train_mode=False,mean=dataset_mean, std=dataset_std)
+
+def IOU_calc(y_true, y_pred):
+    y_true_f = K.flatten(y_true)
+    y_pred_f = K.flatten(y_pred)
+    intersection = K.sum(y_true_f * y_pred_f)
+
+    return 2*(intersection + smooth) / (K.sum(y_true_f) + K.sum(y_pred_f) + smooth)
+
+
+def IOU_calc_loss(y_true, y_pred):
+    return -IOU_calc(y_true, y_pred)
+
 
 def main():
-    parser = argparse.ArgumentParser()
-    arg = parser.add_argument
-    arg('--jaccard-weight', default=0.5, type=float)
-    arg('--device-ids', type=str, default='0', help='For example 0,1 to run on two GPUs')
-    arg('--fold', type=int, help='fold', default=0)
-    arg('--root', default='runs/debug', help='checkpoint root')
-    arg('--batch-size', type=int, default=1)
-    arg('--n-epochs', type=int, default=100)
-    arg('--lr', type=float, default=0.0001)
-    arg('--workers', type=int, default=12)
-    arg('--train_crop_height', type=int, default=1024)
-    arg('--train_crop_width', type=int, default=1280)
-    arg('--val_crop_height', type=int, default=1024)
-    arg('--val_crop_width', type=int, default=1280)
-    arg('--type', type=str, default='binary', choices=['eyes'])
-    arg('--model', type=str, default='UNet', choices=model_list.keys())
-
-    args = parser.parse_args()
-    root = Path(args.root)
-    root.mkdir(exist_ok=True, parents=True)
-
-    num_classes = 1
-
-    if args.type == 'binary':
-        loss = LossBinary(jaccard_weight=args.jaccard_weight)
-    else:
-        loss = LossMulti(num_classes=num_classes, jaccard_weight=args.jaccard_weight)
-
-    train_loader = DataLoader(
-            dataset= getdatasetready(),
-            num_workers=args.workers,
-            batch_size=args.batch_size
-    )
-
-    valid_loader = DataLoader(
-        dataset=getdatasetready(),
-        num_workers=args.workers,
-        batch_size=args.batch_size
-    )
-
-    valid = validation_binary
-    model = UNet11(num_classes=num_classes, pretrained=True)
-
-    print(train_loader)
-    utils.train(
-        init_optimizer=lambda lr: Adam(model.parameters(), lr=lr),
-        args=args,
-        model=model,
-        criterion=loss,
-        train_loader=train_loader,
-        valid_loader=valid_loader,
-        validation=valid,
-        fold=args.fold,
-        num_classes=num_classes
-    )
+        #input_img = Input((im_height, im_width, 1), name='img')
+        #train_model(training_gen,training_gen,257, checkpoint_path="weights")
+        x, y = getdatasetready()
+        X_train, X_valid, y_train, y_valid = train_test_split(x, y, test_size=0.15, random_state=2018)
+        model.train(X_train, y_train, X_valid, y_valid)
 
 main()
