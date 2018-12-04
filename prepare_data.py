@@ -1,29 +1,10 @@
 import pandas as pd
 import matplotlib.pyplot as plt
-from matplotlib.patches import Rectangle
 import xml.etree.ElementTree as ET
 import numpy as np
 import cv2
+
 from os import walk
-import argparse
-
-
-dataset_mean = [0.5,0.5,0.5]
-dataset_std = [0.5,0.5,0.5]
-
-parser = argparse.ArgumentParser()
-
-parser.add_argument('--batch_size', type=int, default=5, help='input batch size')
-parser.add_argument('--learning_rate', type=float, default=0.0001, help='learning rate')
-parser.add_argument('--lr_decay', type=float, default=0.9, help='learning rate decay')
-parser.add_argument('--epoch', type=int, default=50, help='# of epochs')
-parser.add_argument('--imSize', type=int, default=256, help='then crop to this size')
-parser.add_argument('--iter_epoch', type=int, default=0, help='# of iteration as an epoch')
-parser.add_argument('--num_class', type=int, default=2, help='# of classes')
-parser.add_argument('--checkpoint_path', type=str, default='', help='where checkpoint saved')
-parser.add_argument('--data_path', type=str, default='', help='where dataset saved. See loader.py to know how to organize the dataset folder')
-parser.add_argument('--load_from_checkpoint', type=str, default='', help='where checkpoint saved')
-opt = parser.parse_args()
 
 
 # # # Get path where dataset is stored # # #
@@ -59,8 +40,6 @@ def xml2dataframe():
 
     return df_labels
 
-
-df = xml2dataframe()
 
 def trans_image(image,bb_boxes_f,trans_range):
     # Translation augmentation
@@ -149,7 +128,7 @@ def getImage(df, ind, size=(128, 128), augmentation = False, trans_range = 20, s
 
     return file_name, img, bnd_boxes
 
-def generate_train_batch(batch_size = 32):
+def generate_train_batch(df, batch_size = 32):
 
     batch_images = np.zeros((batch_size, img_rows, img_cols, 3))
     batch_masks = np.zeros((batch_size, img_rows, img_cols, 1))
@@ -209,7 +188,6 @@ def plot_im_mask(im,im_mask):
     plt.imshow(im)
     plt.axis('off')
     plt.subplot(1,3,2)
-    print(list(im))
     plt.imshow(im_mask[:,:,0])
     plt.axis('off')
     plt.subplot(1,3,3)
@@ -246,36 +224,34 @@ def plot_im_bbox(im,bb_boxes):
     plt.axis('off');
 
 
+def dataset():
+    df = xml2dataframe()
+    training_gen = generate_train_batch(df, 12)
+    return training_gen
 
 
-
-def getdatasetready():
+def dataset_names():
     """ index, xmax, ymax, nome, tipo """
+
     df = xml2dataframe()
     elements_count = df.shape
-    batch_images = np.zeros((elements_count[0], img_rows, img_cols, 3))
-    batch_masks = np.zeros((elements_count[0], img_rows, img_cols, 1))
-    for d in range(elements_count[0]):
-        file_name, img, bnd_boxes = getImage(df, d)
-        img_mask = get_mask_seg(img, bnd_boxes)
-        batch_images[d] = img
-        batch_masks[d] = img_mask
 
-    return batch_images, batch_masks
+    dic_name = dict()
+    for index,row in df.iterrows():
+        dic_name[row['frame']] = index
+
+    batch_images = np.zeros((dic_name.items().__len__(), img_rows, img_cols, 3))
+    batch_masks = np.zeros((dic_name.items().__len__(), img_rows, img_cols, 1))
+    names = []
+    idx = 0
+    for value in dic_name:
+         pos = dic_name[value]
+         file_name, img, bnd_boxes = getImage(df, pos)
+         img_mask = get_mask_seg(img, bnd_boxes)
+         batch_images[idx] = img
+         batch_masks[idx] = img_mask
+         names.append(file_name)
+         idx+=1
 
 
-def dataLoader():
-    # image normalization default: scale to [-1,1]
-
-
-    # seed has to been set to synchronize img and mask generators
-    seed = 1
-
-    train_image_datagen, train_mask_datagen = getdatasetready()
-
-    #samples = train_image_datagen.samples
-   # generator = imerge(train_image_datagen, train_mask_datagen)
-
-    #return generator, samples
-
-dataLoader()
+    return batch_images, batch_masks, names
