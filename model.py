@@ -1,24 +1,23 @@
 from keras.models import Model
 from keras.layers import Input, BatchNormalization, Activation, Dropout
 from keras.layers.convolutional import Conv2D, Conv2DTranspose
-from keras.layers.pooling import MaxPooling2D
 from keras.layers.merge import concatenate
 from keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
 from keras.optimizers import Adam
 from keras.applications.vgg16 import VGG16
 from keras import backend as K
-from matplotlib import pyplot as plt
+from prepare_data import plot_im_mask
 import cv2
+import matplotlib.pyplot as plt
 import numpy as np
-
 
 # PARAMETERS #
 
-im_width = 128
-im_height = 128
+im_width = 256
+im_height = 256
+
 
 # UNET MODEL #
-
 
 def conv2d_block(input_tensor, n_filters, kernel_size=3, batchnorm=True):
     # first layer
@@ -36,13 +35,14 @@ def conv2d_block(input_tensor, n_filters, kernel_size=3, batchnorm=True):
     return x
 
 
-def get_unet_pre_trained(input_img, n_filters=16, dropout=0.5, batchnorm=True):
+def get_unet_pre_trained(input_img, n_filters=32, n_classes=2, dropout=0.5, batchnorm=True, activation='sigmoid', weights=None):
 
-    vgg_model = VGG16(weights='imagenet', input_tensor=input_img, include_top=False)
+    vgg_model = VGG16(input_tensor=input_img, weights='imagenet',include_top=False)
 
     layers = dict([(layer.name, layer) for layer in vgg_model.layers])
 
     vgg_top = layers['block5_conv3'].output
+
     # Now getting bottom layers for multi-scale skip-layers
     block1_conv2 = layers['block1_conv2'].output
     block2_conv2 = layers['block2_conv2'].output
@@ -69,80 +69,20 @@ def get_unet_pre_trained(input_img, n_filters=16, dropout=0.5, batchnorm=True):
     u9 = concatenate([u9, block1_conv2], axis=3)
     u9 = Dropout(dropout)(u9)
     c9 = conv2d_block(u9, n_filters=n_filters * 1, kernel_size=3, batchnorm=batchnorm)
+    outputs = Conv2D(n_classes, (1, 1), activation=activation)(c9)
+    model = Model(inputs=vgg_model.input, outputs=[outputs])
 
-    outputs = Conv2D(1, (1, 1), activation='sigmoid')(c9)
-    model = Model(inputs=[input_img], outputs=[outputs])
+    for layer in model.layers[:18]:
+        layer.trainable = False
+
     model.summary()
     return model
-
-
-def get_unet(input_img, n_filters=16, dropout=0.5, batchnorm=True):
-    # contracting path
-    c1 = conv2d_block(input_img, n_filters=n_filters * 1, kernel_size=3, batchnorm=batchnorm)
-    p1 = MaxPooling2D((2, 2))(c1)
-    p1 = Dropout(dropout * 0.5)(p1)
-
-    c2 = conv2d_block(p1, n_filters=n_filters * 2, kernel_size=3, batchnorm=batchnorm)
-    p2 = MaxPooling2D((2, 2))(c2)
-    p2 = Dropout(dropout)(p2)
-
-    c3 = conv2d_block(p2, n_filters=n_filters * 4, kernel_size=3, batchnorm=batchnorm)
-    p3 = MaxPooling2D((2, 2))(c3)
-    p3 = Dropout(dropout)(p3)
-
-    c4 = conv2d_block(p3, n_filters=n_filters * 8, kernel_size=3, batchnorm=batchnorm)
-    p4 = MaxPooling2D(pool_size=(2, 2))(c4)
-    p4 = Dropout(dropout)(p4)
-
-    c5 = conv2d_block(p4, n_filters=n_filters * 16, kernel_size=3, batchnorm=batchnorm)
-
-    # expansive path
-    u6 = Conv2DTranspose(n_filters * 8, (3, 3), strides=(2, 2), padding='same')(c5)
-    u6 = concatenate([u6, c4])
-    u6 = Dropout(dropout)(u6)
-    c6 = conv2d_block(u6, n_filters=n_filters * 8, kernel_size=3, batchnorm=batchnorm)
-
-    u7 = Conv2DTranspose(n_filters * 4, (3, 3), strides=(2, 2), padding='same')(c6)
-    u7 = concatenate([u7, c3])
-    u7 = Dropout(dropout)(u7)
-    c7 = conv2d_block(u7, n_filters=n_filters * 4, kernel_size=3, batchnorm=batchnorm)
-
-    u8 = Conv2DTranspose(n_filters * 2, (3, 3), strides=(2, 2), padding='same')(c7)
-    u8 = concatenate([u8, c2])
-    u8 = Dropout(dropout)(u8)
-    c8 = conv2d_block(u8, n_filters=n_filters * 2, kernel_size=3, batchnorm=batchnorm)
-
-    u9 = Conv2DTranspose(n_filters * 1, (3, 3), strides=(2, 2), padding='same')(c8)
-    u9 = concatenate([u9, c1], axis=3)
-    u9 = Dropout(dropout)(u9)
-    c9 = conv2d_block(u9, n_filters=n_filters * 1, kernel_size=3, batchnorm=batchnorm)
-
-    outputs = Conv2D(1, (1, 1), activation='sigmoid')(c9)
-    model = Model(inputs=[input_img], outputs=[outputs])
-    model.summary()
-    return model
-
-
-def train_generator(training_gen, samples_per_epoch=100, nb_epoch=5):
-
-    input_img = Input((im_height, im_width, 3), name='img')
-    model = get_unet(input_img, n_filters=16, dropout=0.05, batchnorm=True)
-    #model = get_unet_pre_trained(input_img, n_filters=16, dropout=0.05, batchnorm=True)
-    model.compile(optimizer=Adam(lr=1e-4), loss=IOU_calc_loss, metrics=[IOU_calc])
-    callbacks = [
-        EarlyStopping(patience=10, verbose=1),
-        ReduceLROnPlateau(factor=0.1, patience=3, min_lr=0.00001, verbose=1),
-        ModelCheckpoint('model-tgs-salt.h5', verbose=1, save_best_only=True, save_weights_only=True)
-    ]
-    history = model.fit_generator(training_gen, samples_per_epoch=samples_per_epoch, nb_epoch=nb_epoch, callbacks=callbacks)
 
 
 def train(x_train, y_train, x_valid, y_valid):
     input_img = Input((im_height, im_width, 3), name='img')
-    model = get_unet_pre_trained(input_img, n_filters=16, dropout=0.05, batchnorm=True)
-
-    model.compile(optimizer=Adam(lr=1e-4), loss=IOU_calc_loss, metrics=[IOU_calc])
-    model.summary()
+    model = get_unet_pre_trained(input_img, n_filters=32, dropout=0.05, batchnorm=True)
+    model.compile(optimizer=Adam(lr=1e-4), loss=iou_calc_loss, metrics=[iou_calc])
 
     callbacks = [
         EarlyStopping(patience=10, verbose=1),
@@ -150,23 +90,37 @@ def train(x_train, y_train, x_valid, y_valid):
         ModelCheckpoint('model-tgs-salt.h5', verbose=1, save_best_only=True, save_weights_only=True)
     ]
 
-    results = model.fit(x_train, y_train, batch_size=32, epochs=100, callbacks=callbacks,
+    results = model.fit(x_train, y_train, batch_size=5, epochs=150, callbacks=callbacks,
                         validation_data=(x_valid, y_valid))
+
+    print(results.history['iou_calc'])
+
 
     return model, results
 
 
 def test(batch_img, model):
-    pred_all = model.predict(batch_img)
-    for i in range(20):
-        im = np.array(batch_img[i], dtype=np.uint8)
-        im_pred = np.array(255 * pred_all[i], dtype=np.uint8)
+    mask1 = model.predict(batch_img)
+    masks = mask1[0]
 
+    masks = np.reshape(masks, (2,256,256))
+    for i in range(1):
+
+        im = np.array(batch_img[i], dtype=np.uint8)
+        img_mask = np.reshape( masks[0], (np.shape( masks[0])[0], np.shape( masks[0])[1], 1))
+        img_mask1 = np.reshape(masks[1], (np.shape(masks[0])[0], np.shape(masks[0])[1], 1))
+        im_pred1 = np.array(255 *img_mask1, dtype=np.uint8)
+        im_pred = np.array(255 *img_mask, dtype=np.uint8)
         rgb_mask_pred = cv2.cvtColor(im_pred, cv2.COLOR_GRAY2RGB)
         rgb_mask_pred[:, :, 1:3] = 0 * rgb_mask_pred[:, :, 1:2]
-
         img_pred = cv2.addWeighted(rgb_mask_pred, 0.5, im, 0.5, 0)
 
+        iris = cv2.cvtColor(im_pred1, cv2.COLOR_GRAY2RGB)
+        iris[:, :, 0] = 0 * iris[:, :, 0]
+        iris[:, :, 2] = 0 * iris[:, :, 2]
+        img_pred = cv2.addWeighted(iris, 0.5, img_pred, 0.5, 0)
+
+        plot_im_mask(im, img_mask)
         plt.figure(figsize=(8, 3))
         plt.subplot(1, 3, 1)
         plt.imshow(im)
@@ -194,10 +148,8 @@ def iou_calc_loss(y_true, y_pred):
 
 def load_model():
     input_img = Input((im_height, im_width, 3), name='img')
-    model = get_unet(input_img, n_filters=16, dropout=0.05, batchnorm=True)
-    model.compile(optimizer=Adam(optimizer=Adam(lr=1e-4), loss=iou_calc_loss(), metrics=[iou_calc]),
-                  loss="binary_crossentropy", metrics=["accuracy"])
-
-    model.load_weights('model-tgs-salt.h5')
-    #model.evaluate(x_valid, y_valid, verbose=1)
+    model = get_unet_pre_trained(input_img, n_filters=32, dropout=0.05, batchnorm=True, n_classes=2)
+    model.load_weights("model-tgs-salt.h5")
     return model
+
+

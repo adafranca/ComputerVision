@@ -1,155 +1,305 @@
-import pandas as pd
 import matplotlib.pyplot as plt
-import xml.etree.ElementTree as ET
 import numpy as np
 import cv2
-
 from os import walk
+import random
+from scipy import ndarray
+import skimage as sk
+from skimage import transform
+from imgaug import augmenters as iaa
+import json
 
 
 # # # Get path where dataset is stored # # #
-
 dir_dataset = ['dataset-strabismus']
-img_rows = 128
-img_cols = 128
+img_rows = 256
+img_cols = 256
 
 
-def xml2dataframe():
+def random_rotation(image, mask, mask1):
+    random_degree = random.uniform(-50, 50)
+    return sk.transform.rotate(image, random_degree, preserve_range=True).astype(np.uint8), sk.transform.rotate(mask, random_degree, preserve_range=True).astype(np.uint8), sk.transform.rotate(mask1, random_degree, preserve_range=True).astype(np.uint8)
+
+
+def random_noise(image_array: ndarray):
+    seq = iaa.Sequential([
+        iaa.GaussianBlur(sigma=(1.0, 3.0))
+    ])
+    return seq.augment_image(image_array)
+
+
+def color(image_array: ndarray):
+    seq = iaa.Sequential([
+        iaa.Sharpen(lightness=1.00, alpha=1)
+    ])
+    return seq.augment_image(image_array)
+
+
+def arithmetic(image_array: ndarray):
+    seq = iaa.Sequential([
+        iaa.Salt(p=0.03)
+    ])
+    return seq.augment_image(image_array)
+
+
+def brightness(image):
+    i = random.randint(0,3)
+    items = [0.25, 1.00, 0.5, 1.5]
+    seq = iaa.Sequential([
+        iaa.Multiply(mul=items[i]),
+        iaa.Sharpen(lightness=1.00, alpha=1)
+    ])
+    return seq.augment_image(image)
+
+
+def horizontal_flip(image_array: ndarray, mask_array: ndarray):
+    # horizontal flip doesn't need skimage, it's easy as flipping the image array of pixels !
+    return image_array[:, ::-1], mask_array[:, ::-1]
+
+
+def plot_im_mask(im,im_mask):
+    ### Function to plot image mask
+
+    im = np.array(im,dtype=np.uint8)
+    im_mask = np.array(im_mask,dtype=np.uint8)
+    plt.subplot(1, 3, 1)
+    plt.imshow(im)
+    plt.axis('off')
+    plt.subplot(1,3,2)
+    plt.imshow(im_mask[:, :, 0])
+    plt.axis('off')
+    plt.subplot(1, 3, 3)
+    plt.imshow(cv2.bitwise_and(im,im,mask=im_mask))
+    plt.axis('off')
+    plt.show()
+
+
+def readJSON():
 
     list_labels = []
-    df_columns = ['nome', 'tipo', 'frame', 'xmin', 'ymin', 'xmax', 'ymax']
-    df_labels = pd.DataFrame(columns=df_columns)
-
     for (dirpath, dirnames, filenames) in walk(dir_dataset[0]):
         for file in filenames:
-            if 'LABEL' in file:
-                list_labels.append(dirpath + '/' + file)
-                parsedXML = ET.parse(dirpath + "/" + file)
+            if 'LABEL' in file and 'json' in file:
+                with open(dir_dataset[0] + "/" + file) as f:
+                    data = json.load(f)
+                    list_labels.append(data)
 
-                for root in parsedXML.getroot():
-                    if 'object' in root.tag:
-                        name = root.find('name').text
-                        frame = file.replace('LABEL|', '') + ".jpg"
-                        bndbox = root.find('bndbox')
-                        xmin = float(bndbox.find('xmin').text.replace(".0", ''))
-                        ymin = float(bndbox.find('ymin').text.replace(".0", ''))
-                        xmax = float(bndbox.find('xmax').text.replace(".0", ''))
-                        ymax = float(bndbox.find('ymax').text.replace(".0", ''))
-                        df_labels = df_labels.append(
-                            pd.Series([file, name, frame, xmin, ymin, xmax, ymax], index=df_columns), ignore_index=True)
-
-    return df_labels
+    return list_labels
 
 
-def trans_image(image,bb_boxes_f,trans_range):
-    # Translation augmentation
-    bb_boxes_f = bb_boxes_f.copy(deep=True)
+def dados():
+    labels = readJSON()
 
-    tr_x = trans_range*np.random.uniform()-trans_range/2
-    tr_y = trans_range*np.random.uniform()-trans_range/2
+    batch_images = np.zeros((np.shape(labels)[0] * 3, img_rows, img_cols, 3))
+    batch_masks = np.zeros((np.shape(labels)[0] * 3,2, img_rows, img_cols, 1))
 
-    Trans_M = np.float32([[1,0,tr_x],[0,1,tr_y]])
-    rows,cols,channels = image.shape
-    bb_boxes_f['xmin'] = bb_boxes_f['xmin']+tr_x
-    bb_boxes_f['xmax'] = bb_boxes_f['xmax']+tr_x
-    bb_boxes_f['ymin'] = bb_boxes_f['ymin']+tr_y
-    bb_boxes_f['ymax'] = bb_boxes_f['ymax']+tr_y
+    z = 0
 
-    image_tr = cv2.warpAffine(image,Trans_M,(cols,rows))
+    for label in labels:
+        img = cv2.imread(dir_dataset[0] + "/" + label['imagePath'])
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-    return image_tr,bb_boxes_f
+        height, width, channels = img.shape
+        shapes = label['shapes']
+        eyes = []
+        iris = []
 
-def stretch_image(img,bb_boxes_f,scale_range):
-    # Stretching augmentation
+        mask1 = np.zeros((height, width, 3), np.uint8)
+        for shape in shapes:
+            points = shape['points']
+            nome = shape['label']
+            if nome == 'eyes':
+                eyes.append(points)
+            if nome == 'iris':
+                iris.append(points)
 
-    bb_boxes_f = bb_boxes_f.copy(deep=True)
+        for point in eyes:
+            point = np.array(point)
+            mask1 = cv2.fillPoly(mask1, np.int32([point]), (0, 255, 255))
+        for point in iris:
+            point = np.array(point)
+            mask1 = cv2.fillPoly(mask1, np.int32([point]), 255)
 
-    tr_x1 = scale_range*np.random.uniform()
-    tr_y1 = scale_range*np.random.uniform()
-    p1 = (tr_x1,tr_y1)
-    tr_x2 = scale_range*np.random.uniform()
-    tr_y2 = scale_range*np.random.uniform()
-    p2 = (img.shape[1]-tr_x2,tr_y1)
+        mask1 = cv2.cvtColor(mask1, cv2.COLOR_BGR2RGB)
+        mask1 = cv2.resize(mask1, (img_cols, img_rows))
+        # cv2.imwrite("new/" + label['imagePath'], img)
+        # cv2.imwrite("new/MASK|" + label['imagePath'], mask1)
+        img = cv2.resize(img, (img_cols, img_rows))
+        img_mask = np.zeros_like(mask1[:, :, 0])
+        iris = []
+        for i in range(np.shape(mask1)[0]):
+            for j in range(np.shape(mask1)[1]):
+                r = str(mask1[i][j][0])
+                g = str(mask1[i][j][1])
+                b = str(mask1[i][j][2])
 
-    p3 = (img.shape[1]-tr_x2,img.shape[0]-tr_y2)
-    p4 = (tr_x1,img.shape[0]-tr_y2)
+                # iris 0 , 0, 255
+                if r == "0" and g == '0' and b == '255':
+                  iris.append([i, j])
 
-    pts1 = np.float32([[p1[0],p1[1]],
-                   [p2[0],p2[1]],
-                   [p3[0],p3[1]],
-                   [p4[0],p4[1]]])
-    pts2 = np.float32([[0,0],
-                   [img.shape[1],0],
-                   [img.shape[1],img.shape[0]],
-                   [0,img.shape[0]] ]
-                   )
+                # eyes 255 , 255, 0
+                # if r == "255" and g == '255'   and b == '0':
+                # img_mask[i, j] = 1
 
-    M = cv2.getPerspectiveTransform(pts1,pts2)
-    img = cv2.warpPerspective(img,M,(img.shape[1],img.shape[0]))
-    img = np.array(img,dtype=np.uint8)
+                if r != "0" or g != "0" or b != "0":
+                    img_mask[i, j] = 1
 
-    bb_boxes_f['xmin'] = (bb_boxes_f['xmin'] - p1[0])/(p2[0]-p1[0])*img.shape[1]
-    bb_boxes_f['xmax'] = (bb_boxes_f['xmax'] - p1[0])/(p2[0]-p1[0])*img.shape[1]
-    bb_boxes_f['ymin'] = (bb_boxes_f['ymin'] - p1[1])/(p3[1]-p1[1])*img.shape[0]
-    bb_boxes_f['ymax'] = (bb_boxes_f['ymax'] - p1[1])/(p3[1]-p1[1])*img.shape[0]
+        img_mask2 = np.zeros_like(mask1[:, :, 0])
+        for l in iris:
+            img_mask[l[0], l[1]] = 0
+            img_mask2[l[0],l[1]] = 1
 
-    return img,bb_boxes_f
+        img_mask = np.reshape(img_mask, (np.shape(img_mask)[0], np.shape(img_mask)[1], 1))
+        img_mask2 = np.reshape(img_mask2, (np.shape(img_mask2)[0], np.shape(img_mask2)[1], 1))
 
-def augment_brightness_camera_images(image):
+        plot_im_mask(img,img_mask)
 
-    ### Augment brightness
-    image1 = cv2.cvtColor(image,cv2.COLOR_RGB2HSV)
-    random_bright = .25+np.random.uniform()
-    #print(random_bright)
-    image1[:,:,2] = image1[:,:,2]*random_bright
-    image1 = cv2.cvtColor(image1,cv2.COLOR_HSV2RGB)
-    return image1
+        plot_im_mask(img,img_mask2)
+        break
+        masks = []
+
+        masks.append(img_mask)
+        masks.append(img_mask2)
+
+        masks = np.array(masks)
+
+        batch_images[z] = img
+        batch_masks[z] = masks
+
+        # augmented
+        i = random.randint(0, 2)
+        z += 1
+
+        image, image_mask, image_mask2 = random_rotation(img, img_mask, img_mask2)
+
+        masks_r = []
+        masks_r.append(image_mask)
+        masks_r.append(image_mask2)
+        masks_r = np.array(masks_r)
+        batch_images[z] = image
+        batch_masks[z] = masks_r
+        # plot_im_mask(image, image_mask)
+
+        z += 1
+        if i == 0:
+            batch_images[z] = random_noise(img)
+            batch_masks[z] = masks
+        if i == 1:
+            batch_images[z] = color(img)
+            batch_masks[z] = masks
+        if i == 2:
+            batch_images[z] = brightness(img)
+            batch_masks[z] = masks
+        z += 1
+
+    return batch_images, batch_masks
 
 
-def getImage(df, ind, size=(128, 128), augmentation = False, trans_range = 20, scale_range=20):
-    file_name = df['frame'][ind]
-    img = cv2.imread(dir_dataset[0] + '/' + file_name)
-    img_size = np.shape(img)
+def createMask():
+    labels = readJSON()
+
+    batch_images = np.zeros((np.shape(labels)[0]*3, img_rows, img_cols, 3))
+    batch_masks = np.zeros((np.shape(labels)[0]*3, img_rows, img_cols, 1))
+
+    z = 0
+
+    for label in labels:
+        img = cv2.imread(dir_dataset[0] + "/" + label['imagePath'])
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+       # print(label)
+        height, width, channels = img.shape
+        shapes = label['shapes']
+        eyes = []
+        iris = []
+
+        mask1 = np.zeros((height, width, 3), np.uint8)
+        for shape in shapes:
+            points = shape['points']
+            nome = shape['label']
+            if nome == 'eyes':
+                eyes.append(points)
+            if nome == 'iris':
+                iris.append(points)
+
+        for point in eyes:
+            point = np.array(point)
+            mask1 = cv2.fillPoly(mask1, np.int32([point]), (0, 255, 255))
+        for point in iris:
+            point = np.array(point)
+            mask1 = cv2.fillPoly(mask1, np.int32([point]), 255)
+
+        mask1 = cv2.cvtColor(mask1, cv2.COLOR_BGR2RGB)
+        mask1 = cv2.resize(mask1, (img_cols, img_rows))
+        #cv2.imwrite("new/" + label['imagePath'], img)
+        #cv2.imwrite("new/MASK|" + label['imagePath'], mask1)
+
+        img = cv2.resize(img, (img_cols, img_rows))
+        img_mask = np.zeros_like(mask1[:, :, 0])
+        iris = []
+        for i in range(np.shape(mask1)[0]):
+            for j in range(np.shape(mask1)[1]):
+                r = str(mask1[i][j][0])
+                g = str(mask1[i][j][1])
+                b = str(mask1[i][j][2])
+
+                # iris 0 , 0, 255
+               # if r == "0" and g == '0' and b == '255':
+                  #  iris.append([i, j])
+
+                # eyes 255 , 255, 0
+                #if r == "255" and g == '255'   and b == '0':
+                   #img_mask[i, j] = 1
+
+                if r != "0" or g != "0" or b != "0":
+                    img_mask[i,j] = 1
+
+        #for l in iris:
+        #    img_mask[l[0], l[1]] = 2
+
+        img_mask = np.reshape(img_mask, (np.shape(img_mask)[0], np.shape(img_mask)[1], 1))
+
+        #plot_im_mask(mask1, img_mask)
+        #break
+        batch_images[z] = img
+        batch_masks[z] = img_mask
+
+        # augmented
+        i = random.randint(0, 2)
+        z += 1
+
+        image, image_mask = random_rotation(img, img_mask)
+        batch_images[z] = image
+        batch_masks[z] = image_mask
+        #plot_im_mask(image, image_mask)
+
+        z+= 1
+        if i == 0:
+            batch_images[z] = random_noise(img)
+            batch_masks[z] = img_mask
+        if i == 1:
+            batch_images[z] = color(img)
+            batch_masks[z] = img_mask
+        if i == 2:
+            batch_images[z] = brightness(img)
+            batch_masks[z] = img_mask
+        z += 1
+
+
+    return batch_images, batch_masks
+
+
+def get_test():
+    batch_images = np.zeros((1, img_rows, img_cols, 3))
+
+    img = cv2.imread("dataset-strabismus/20140107_164742 001.jpg")
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    img = cv2.resize(img, size)
-    bnd_boxes = df[df['frame'] == file_name].reset_index()
-    img_size_post = np.shape(img)
-
-    if augmentation == True:
-        img, bnd_boxes = trans_image(img, bnd_boxes, trans_range)
-        img, bnd_boxes = stretch_image(img, bnd_boxes, scale_range)
-        img = augment_brightness_camera_images(img)
-
-    bnd_boxes['xmin'] = np.round(bnd_boxes['xmin'] / img_size[1] * img_size_post[1])
-    bnd_boxes['xmax'] = np.round(bnd_boxes['xmax'] / img_size[1] * img_size_post[1])
-    bnd_boxes['ymin'] = np.round(bnd_boxes['ymin'] / img_size[0] * img_size_post[0])
-    bnd_boxes['ymax'] = np.round(bnd_boxes['ymax'] / img_size[0] * img_size_post[0])
-    bnd_boxes['Area'] = np.round(bnd_boxes['xmax'] - bnd_boxes['xmin']) * (bnd_boxes['ymax'] - bnd_boxes['ymin'])
-
-    return file_name, img, bnd_boxes
-
-def generate_train_batch(df, batch_size = 32):
-
-    batch_images = np.zeros((batch_size, img_rows, img_cols, 3))
-    batch_masks = np.zeros((batch_size, img_rows, img_cols, 1))
-
-    while 1:
-        for i_batch in range(batch_size):
-            i_line = np.random.randint(len(df))
-            name_str,img,bb_boxes = getImage(df,i_line,
-                                                   size=(img_cols, img_rows),
-                                                  augmentation=True,
-                                                   trans_range=50,
-                                                   scale_range=50
-                                                  )
-            img_mask = get_mask_seg(img,bb_boxes)
-            batch_images[i_batch] = img
-            batch_masks[i_batch] =img_mask
-        yield batch_images, batch_masks
+    img = cv2.resize(img, (img_cols, img_rows))
+    batch_images[0] = img
+    return batch_images
 
 
 def showImage(img):
-    screen_res = 1280, 720
+    screen_res = 1920, 1080
     scale_width = screen_res[0] / img.shape[1]
     scale_height = screen_res[1] / img.shape[0]
     scale = min(scale_width, scale_height)
@@ -164,94 +314,10 @@ def showImage(img):
     cv2.destroyAllWindows()
 
 
-def get_mask_seg(img,bb_boxes_f):
-
-    #### Get mask
-
-   img_mask = np.zeros_like(img[:,:,0])
-   for i in range(len(bb_boxes_f)):
-        bb_box_i = [bb_boxes_f.iloc[i]['xmin'],bb_boxes_f.iloc[i]['ymin'],
-                bb_boxes_f.iloc[i]['xmax'],bb_boxes_f.iloc[i]['ymax']]
-        bb_box_i = list(map(int, bb_box_i))
-        img_mask[bb_box_i[1]:bb_box_i[3],bb_box_i[0]:bb_box_i[2]] = 1
-        img_mask = np.reshape(img_mask,(np.shape(img_mask)[0],np.shape(img_mask)[1],1))
-
-   return img_mask
 
 
-def plot_im_mask(im,im_mask):
-    ### Function to plot image mask
-
-    im = np.array(im,dtype=np.uint8)
-    im_mask = np.array(im_mask,dtype=np.uint8)
-    plt.subplot(1,3,1)
-    plt.imshow(im)
-    plt.axis('off')
-    plt.subplot(1,3,2)
-    plt.imshow(im_mask[:,:,0])
-    plt.axis('off')
-    plt.subplot(1,3,3)
-    plt.imshow(cv2.bitwise_and(im,im,mask=im_mask));
-    plt.axis('off')
-    plt.show()
 
 
-def plot_bbox(bb_boxes,ind_bb,color='r',linewidth=2):
-    ### Plot bounding box
-
-    bb_box_i = [bb_boxes.iloc[ind_bb]['xmin'],
-                bb_boxes.iloc[ind_bb]['ymin'],
-                bb_boxes.iloc[ind_bb]['xmax'],
-                bb_boxes.iloc[ind_bb]['ymax']]
-    bb_box_i = list(map(int, bb_box_i))
-    plt.plot([bb_box_i[0],bb_box_i[2],bb_box_i[2],
-                  bb_box_i[0],bb_box_i[0]],
-             [bb_box_i[1],bb_box_i[1],bb_box_i[3],
-                  bb_box_i[3],bb_box_i[1]],
-             color,linewidth=linewidth)
 
 
-def plot_im_bbox(im,bb_boxes):
-    ### Plot image and bounding box
-    plt.imshow(im)
-    for i in range(len(bb_boxes)):
-        plot_bbox(bb_boxes,i,'g')
 
-        bb_box_i = [bb_boxes.iloc[i]['xmin'],bb_boxes.iloc[i]['ymin'],
-                bb_boxes.iloc[i]['xmax'],bb_boxes.iloc[i]['ymax']]
-        plt.plot(bb_box_i[0],bb_box_i[1],'rs')
-        plt.plot(bb_box_i[2],bb_box_i[3],'bs')
-    plt.axis('off');
-
-
-def dataset():
-    df = xml2dataframe()
-    training_gen = generate_train_batch(df, 12)
-    return training_gen
-
-
-def dataset_names():
-    """ index, xmax, ymax, nome, tipo """
-
-    df = xml2dataframe()
-    elements_count = df.shape
-
-    dic_name = dict()
-    for index,row in df.iterrows():
-        dic_name[row['frame']] = index
-
-    batch_images = np.zeros((dic_name.items().__len__(), img_rows, img_cols, 3))
-    batch_masks = np.zeros((dic_name.items().__len__(), img_rows, img_cols, 1))
-    names = []
-    idx = 0
-    for value in dic_name:
-         pos = dic_name[value]
-         file_name, img, bnd_boxes = getImage(df, pos)
-         img_mask = get_mask_seg(img, bnd_boxes)
-         batch_images[idx] = img
-         batch_masks[idx] = img_mask
-         names.append(file_name)
-         idx+=1
-
-
-    return batch_images, batch_masks, names
